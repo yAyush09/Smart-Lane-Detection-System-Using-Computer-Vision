@@ -1,32 +1,32 @@
-import streamlit as st
-import torch  
-from torchvision import transforms
+import streamlit as st 
 from PIL import Image
 import numpy as np
 import cv2
 import tempfile
-from tensorflow.keras.models import load_model 
+from tensorflow.keras.models import load_model as keras_load_model 
 
 @st.cache_resource
 def load_model(model_path="lane_detection_model.h5"):
-    model = load_model(model_path)
+    model = keras_load_model(model_path, compile=False)
     return model
 
 
 
 def predict_lanes(image, model):
-   
-    transform = transforms.Compose([
-        transforms.Resize((256, 256)),  
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.5], std=[0.5]), 
-    ])
-    input_image = transform(image).unsqueeze(0)  
+    image = image.convert("RGB").resize((320, 320))
+    input_image = np.array(image, dtype=np.float32)
+    input_image = cv2.cvtColor(input_image, cv2.COLOR_RGB2BGR)
+    input_image = np.expand_dims(input_image / 255.0, axis=0)
 
-    with torch.no_grad():
-        output = model(input_image)
+    output = model.predict(input_image, verbose=0)
 
-    predicted_mask = output.squeeze().numpy() > 0.5 
+    print("Output Min:", np.min(output))
+    print("Output Max:", np.max(output))
+    print("Output Mean:", np.mean(output))
+
+    predicted_mask = output.squeeze() > 0.01
+    print("White Pixels:", np.sum(predicted_mask))
+
     return predicted_mask
 
 
@@ -179,16 +179,44 @@ if choice == 'Image':
         elif transformation == 'Model Prediction':
             model = load_model()
             lane_mask = predict_lanes(image, model)
-            st.image(lane_mask, caption='Predicted Lane Mask', use_column_width=True)
+            st.image(lane_mask.astype(np.uint8) * 255,
+                     caption='Predicted Lane Mask',
+                     use_column_width=True)
 
+        
         elif transformation == 'Final Overlay':
-            model = load_model()
-            lane_mask = predict_lanes(image, model)
+            frame = np.array(image.convert("RGB"))
+            gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+            blur = cv2.GaussianBlur(gray, (5, 5), 0)
+            edges = cv2.Canny(blur, 50, 150)
 
-            overlay = np.array(image)
-            lane_mask_resized = cv2.resize(lane_mask.astype('uint8') * 255, (overlay.shape[1], overlay.shape[0]))
-            overlay[lane_mask_resized > 0] = [255, 0, 0]  
-            st.image(overlay, caption='Final Image with Detected Lanes', use_column_width=True)
+            height, width = edges.shape
+            mask = np.zeros_like(edges)
+
+            polygon = np.array([[
+                (int(width * 0.1), height),
+                (int(width * 0.4), int(height * 0.55)),
+                (int(width * 0.6), int(height * 0.55)),
+                (int(width * 0.9), height)
+            ]], dtype=np.int32)
+
+            cv2.fillPoly(mask, polygon, 255)
+            cropped = cv2.bitwise_and(edges, mask)
+
+            lines = cv2.HoughLinesP(
+                cropped, 1, np.pi / 180, 40,
+                minLineLength=40, maxLineGap=100
+            )
+
+            overlay = frame.copy()
+
+            if lines is not None:
+                for line in lines:
+                    x1, y1, x2, y2 = map(int, np.array(line).reshape(-1)[:4])
+                    cv2.line(overlay, (x1, y1), (x2, y2), (255, 0, 0), 5)
+
+            result = cv2.addWeighted(frame, 0.8, overlay, 0.8, 0)
+            st.image(result, caption="Final Lane Detection", use_column_width=True)
 
             
 #For Video
